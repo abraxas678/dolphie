@@ -1,5 +1,6 @@
 import textwrap
 
+from rich.markup import escape as markup_escape
 from textual import events, on, work
 from textual.app import ComposeResult
 from textual.binding import Binding
@@ -202,10 +203,10 @@ class EventLog(Screen):
 
                     timestamp = f"[#858A97]{row['timestamp'].strftime('%Y-%m-%d %H:%M:%S')}[/#858A97]"
                     error_code = f"[label]{row['error_code']}[/label]"
-                    subsystem = row["subsystem"]
+                    subsystem = markup_escape(row["subsystem"])
 
                     # Wrap the message to 78% of console width so hopefully we don't get a scrollbar
-                    wrapped_message = textwrap.wrap(row["message"], width=round(self.app.console.width * 0.75))
+                    wrapped_message = textwrap.wrap(markup_escape(row["message"]), width=round(self.app.console.width * 0.75))
                     wrapped_message = "\n".join(wrapped_message)
 
                     line_counts = [cell.count("\n") + 1 for cell in wrapped_message]
