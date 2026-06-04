@@ -463,28 +463,6 @@ class CommandManager:
             "ctrl+d",
         ]
 
-        # Standalone modifier and lock key presses, which terminals using the kitty
-        # keyboard protocol report as their own key events (e.g. pressing Shift to
-        # type a capital letter). They're never command attempts, so they're ignored
-        # silently instead of warning that they're "not a valid command".
-        self.ignore_keys = {
-            "left_shift",
-            "right_shift",
-            "left_control",
-            "right_control",
-            "left_alt",
-            "right_alt",
-            "left_super",
-            "right_super",
-            "left_hyper",
-            "right_hyper",
-            "left_meta",
-            "right_meta",
-            "caps_lock",
-            "num_lock",
-            "scroll_lock",
-        }
-
     def get_commands(self, replay_file: str, connection_source: ConnectionSource) -> dict[str, dict[str, str]]:
         if replay_file:
             key = {

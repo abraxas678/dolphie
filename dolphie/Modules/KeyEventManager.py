@@ -74,11 +74,6 @@ class KeyEventManager:
         if not tab:
             return
 
-        # Silently ignore standalone modifier/lock key presses (e.g. Shift when typing
-        # a capital command key) so they don't trip the "not a valid command" warning.
-        if key in self.app.command_manager.ignore_keys:
-            return
-
         # Apply debouncing to prevent rapid key presses
         now = datetime.now().astimezone()
         debounce_interval = self.key_debounce_intervals.get(key, self.default_debounce_interval)
@@ -92,13 +87,12 @@ class KeyEventManager:
         screen_data = None
         dolphie = tab.dolphie
 
-        # Validate key is a valid command (excluding special keys)
+        # Silently ignore keys that aren't commands in the current context. This covers
+        # unbound keys and standalone modifier/lock presses (e.g. left_alt when typing a
+        # capital command key), mirroring Textual's native handling of unmapped keys
+        # rather than warning on every non-command keystroke.
         if key not in self.app.command_manager.exclude_keys:
             if not self.app.command_manager.get_commands(dolphie.replay_file, dolphie.connection_source).get(key):
-                self.app.notify(
-                    f"Key [$highlight]{key}[/$highlight] is not a valid command",
-                    severity="warning",
-                )
                 return
 
             # Prevent commands from being run if the secondary connection is processing a query already
