@@ -297,7 +297,7 @@ TopBar {
 
     /* Boundary-disabled (start/end of replay): dim and non-interactive */
     &:disabled {
-        color: #4a4f5e;
+        color: #969aad;
         text-style: none;
         background: transparent;
         tint: transparent 0%;
