@@ -8,6 +8,7 @@ License: GPL-3.0
 import asyncio
 import os
 import sys
+import time
 from importlib import metadata
 
 import dolphie.Modules.MetricManager as MetricManager
@@ -575,10 +576,82 @@ def setup_logger(config: Config):
     logger.add(lambda _: sys.exit(1), level="CRITICAL")
 
 
+def detect_iterm2() -> None:
+    """Detect iTerm2 by probing the terminal directly and set LC_TERMINAL if found.
+
+    iTerm2 advertises itself via TERM_PROGRAM (set locally) and LC_TERMINAL, but
+    SSH usually strips both: TERM_PROGRAM is never forwarded, and LC_TERMINAL is
+    dropped unless the server's sshd happens to have `AcceptEnv` for it (most
+    don't). Without that signal, Textual's IS_ITERM is False and it negotiates the
+    in-band window resize protocol (DEC private mode 2048), which iTerm2 implements
+    buggily and which corrupts mouse input over SSH.
+
+    Querying the terminal with XTVERSION asks iTerm2 directly over the live PTY, so
+    detection works regardless of env forwarding. We set LC_TERMINAL so Textual's
+    IS_ITERM picks it up (it's read lazily, after this runs, when the input parser
+    is first imported during app.run()).
+    """
+    # Already detectable by Textual, or no terminal to probe.
+    if os.environ.get("LC_TERMINAL") or os.environ.get("TERM_PROGRAM") == "iTerm.app":
+        return
+    if os.environ.get("TERM", "") in ("", "dumb"):
+        return
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        return
+
+    try:
+        import select
+        import termios
+        import tty
+    except ImportError:
+        return  # Non-POSIX (e.g. Windows); nothing to do.
+
+    fd = sys.stdin.fileno()
+    try:
+        old_attrs = termios.tcgetattr(fd)
+    except termios.error:
+        return
+
+    response = ""
+    try:
+        tty.setraw(fd)
+        # XTVERSION request, followed by a Primary Device Attributes request as a
+        # terminator: every terminal answers DA ("\x1b[?...c"), so we know when the
+        # reply is complete instead of relying on a fixed sleep.
+        sys.stdout.write("\x1b[>q\x1b[c")
+        sys.stdout.flush()
+
+        deadline = time.monotonic() + 0.3
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            readable, _, _ = select.select([fd], [], [], remaining)
+            if not readable:
+                break
+            chunk = os.read(fd, 1024)
+            if not chunk:
+                break
+            response += chunk.decode("latin-1", errors="replace")
+            # Stop once the Primary DA reply (ends with "c") has arrived.
+            if "\x1b[?" in response and response.rstrip().endswith("c"):
+                break
+    except (OSError, termios.error):
+        return
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old_attrs)
+
+    if "iTerm2" in response:
+        os.environ["LC_TERMINAL"] = "iTerm2"
+
+
 def main():
     # Set environment variables for better color support
     os.environ["TERM"] = "xterm-256color"
     os.environ["COLORTERM"] = "truecolor"
+
+    # Identify iTerm2 over SSH so Textual avoids a mouse-breaking protocol (see fn docstring).
+    detect_iterm2()
 
     arg_parser = ArgumentParser(__version__)
 
