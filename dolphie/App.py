@@ -90,6 +90,11 @@ class DolphieApp(App):
 
         self._has_tty = sys.stdin.isatty()
 
+        # Replay Back/Forward acceleration: while [ or ] is held (detected via key
+        # auto-repeat in KeyEventManager), the step ramps up so scrubbing covers ground
+        # without a render per row. Manual clicks/taps stay at a single row.
+        self._replay_nav_streak = 0
+
         theme = RichTheme(
             {
                 "white": "#e9e9e9",
@@ -241,17 +246,31 @@ class DolphieApp(App):
 
     # Replay playback actions. Both the ReplayControls buttons and the keyboard
     # shortcuts in KeyEventManager route through these so there's a single code path.
-    def action_replay_back(self):
+    def _replay_nav_step(self, accelerate: bool) -> int:
+        """Returns how many rows a single Back/Forward should move.
+
+        Returns 1 unless [ or ] is being held (``accelerate``), in which case the step
+        ramps up the longer it's held so fast scrubbing covers ground without a render
+        per row. Manual clicks/taps and the ReplayControls buttons always move one row.
+        """
+        if not accelerate:
+            self._replay_nav_streak = 0
+            return 1
+
+        self._replay_nav_streak += 1
+        return min(1 + self._replay_nav_streak // 2, 25)
+
+    def action_replay_back(self, accelerate: bool = False):
         tab = self.tab_manager.active_tab
         if not tab or not tab.dolphie.replay_file:
             return
 
-        if tab.replay_manager.seek_to_previous_id():
+        if tab.replay_manager.seek_relative(-self._replay_nav_step(accelerate)):
             self.force_refresh_for_replay()
         else:
             self.notify("You're already at the beginning of the replay", severity="warning")
 
-    def action_replay_forward(self):
+    def action_replay_forward(self, accelerate: bool = False):
         tab = self.tab_manager.active_tab
         if not tab or not tab.dolphie.replay_file:
             return
@@ -260,6 +279,7 @@ class DolphieApp(App):
             self.notify("You're already at the end of the replay", severity="warning")
             return
 
+        tab.replay_manager.seek_relative(self._replay_nav_step(accelerate))
         self.force_refresh_for_replay()
 
     def action_replay_pause(self):

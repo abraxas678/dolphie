@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+from collections import OrderedDict
 from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -64,6 +65,10 @@ class ReplayManager:
     COMPRESSION_DICT_SIZE = 10 * 1024 * 1024  # 10MB
     COMPRESSION_LEVEL = 5
     COMPRESSION_DICT_SAMPLES = 10
+    # Floor for the number of decompressed metric_manager payloads kept in memory to
+    # speed up backward/seek navigation. The effective cap scales with the rolling
+    # window so a single window always fits (see fetch_delta_metrics_for_window).
+    METRIC_WINDOW_CACHE_SIZE = 1500
 
     def __init__(self, dolphie: Dolphie):
         """Initializes the ReplayManager with Dolphie instance and SQLite database settings.
@@ -88,6 +93,13 @@ class ReplayManager:
         self.replay_file_size: int = 0
         self.dict_samples: list[bytes] = []
         self.global_variable_change_ids: list[int] = []
+
+        # Cache of decompressed metric_manager payloads keyed by replay id. Row data is
+        # immutable for a given id, so entries never go stale; consecutive backward/seek
+        # steps reuse the overlapping window instead of re-decompressing every row.
+        self._metric_window_cache: OrderedDict[int, dict] = OrderedDict()
+        # Effective cache cap, grown to fit the rolling window by fetch_delta_metrics_for_window.
+        self._metric_window_cap: int = self.METRIC_WINDOW_CACHE_SIZE
 
         self._compression_dict: zstd.ZstdCompressionDict = None
         self._compressor: zstd.ZstdCompressor = None
@@ -366,23 +378,52 @@ class ReplayManager:
 
         self.last_purge_time = current_time
 
-    def seek_to_previous_id(self) -> bool:
-        """Moves current_replay_id back so the next fetch returns the previous row. Gap-safe.
+    def seek_relative(self, offset: int) -> bool:
+        """Moves the replay cursor by ``offset`` rows. Gap-safe and range-clamped.
+
+        Negative moves backward, positive forward. If fewer than ``abs(offset)`` rows
+        exist in that direction, the cursor clamps to the first/last row. Used by the
+        Back/Forward actions, which accelerate the offset while the key is held.
+
+        Args:
+            offset: Number of rows to move (negative = backward, positive = forward).
 
         Returns:
-            bool: True if a previous row exists, False if already at the start.
+            bool: True if a target row exists and the cursor moved, False otherwise.
         """
-        row = self._execute_select_one(
-            "SELECT id, timestamp FROM replay_data WHERE id < ? ORDER BY id DESC LIMIT 1",
-            (self.current_replay_id,),
-        )
-        if row:
-            # Set to one before the target so _load_and_parse_replay_data (WHERE id > ?) picks it up
-            self.current_replay_id = row[0] - 1
-            self.current_replay_timestamp = row[1]
-            return True
+        if offset == 0:
+            return False
 
-        return False
+        if offset < 0:
+            row = self._execute_select_one(
+                "SELECT id, timestamp FROM replay_data WHERE id < ? ORDER BY id DESC LIMIT 1 OFFSET ?",
+                (self.current_replay_id, -offset - 1),
+            )
+            if not row:
+                # Fewer than |offset| rows behind; clamp to the earliest row.
+                row = self._execute_select_one(
+                    "SELECT id, timestamp FROM replay_data WHERE id < ? ORDER BY id LIMIT 1",
+                    (self.current_replay_id,),
+                )
+        else:
+            row = self._execute_select_one(
+                "SELECT id, timestamp FROM replay_data WHERE id > ? ORDER BY id LIMIT 1 OFFSET ?",
+                (self.current_replay_id, offset - 1),
+            )
+            if not row:
+                # Fewer than offset rows ahead; clamp to the latest row.
+                row = self._execute_select_one(
+                    "SELECT id, timestamp FROM replay_data WHERE id > ? ORDER BY id DESC LIMIT 1",
+                    (self.current_replay_id,),
+                )
+
+        if not row:
+            return False
+
+        # Land one before the target so _load_and_parse_replay_data (WHERE id > ?) picks it up
+        self.current_replay_id = row[0] - 1
+        self.current_replay_timestamp = row[1]
+        return True
 
     def seek_to_timestamp(self, timestamp: str):
         """Seeks to the specified timestamp in the SQLite database.
@@ -819,18 +860,28 @@ class ReplayManager:
     def _update_replay_metadata_cache(self) -> bool:
         """Updates the replay metadata (min/max timestamps and IDs, total rows).
 
-        Uses two O(1) primary key lookups instead of a full table scan.
+        The max id is an O(1) lookup on the INTEGER PRIMARY KEY. For a static (read-only)
+        replay file nothing changes after the first load, so we recompute the rest of the
+        metadata only when the max id actually advances. This still supports tailing a
+        replay file that's being actively recorded (new rows bump the max id), while
+        avoiding the redundant min lookup on every navigation step.
+
         total_replay_rows is derived from the ID range since IDs are contiguous
         (rows are only ever purged from the beginning).
 
         Returns:
             bool: True if metadata was successfully updated, False otherwise.
         """
-        min_row = self._execute_select_one("SELECT id, timestamp FROM replay_data ORDER BY id LIMIT 1")
-        if not min_row:
+        max_row = self._execute_select_one("SELECT id, timestamp FROM replay_data ORDER BY id DESC LIMIT 1")
+        if not max_row:
             return False
 
-        max_row = self._execute_select_one("SELECT id, timestamp FROM replay_data ORDER BY id DESC LIMIT 1")
+        # Nothing new appended since the last refresh; cached values are still valid.
+        # min_replay_id is only 0 before the first successful load (ids start at 1).
+        if max_row[0] == self.max_replay_id and self.min_replay_id:
+            return True
+
+        min_row = self._execute_select_one("SELECT id, timestamp FROM replay_data ORDER BY id LIMIT 1")
 
         self.min_replay_id = min_row[0]
         self.min_replay_timestamp = min_row[1]
@@ -860,6 +911,15 @@ class ReplayManager:
         # Decompress and parse the JSON data
         try:
             data = orjson.loads(self._decompressor.decompress(row[2]))
+
+            # Warm the window cache with this row's metric_manager so a later backward or
+            # seek over rows we've already played (e.g. after forward auto-play) reuses
+            # this decompression instead of redoing it. Only delta rows are small enough
+            # to be worth keeping; full-snapshot rows (interactive recordings) are skipped.
+            metric_manager = data.get("metric_manager")
+            if metric_manager and metric_manager.get("_delta"):
+                self._remember_metric_manager(self.current_replay_id, metric_manager)
+
             return row[1], data
         except Exception as e:
             self.dolphie.app.notify(str(e), title="Error parsing replay data", severity="error")
@@ -1010,24 +1070,77 @@ class ReplayManager:
         target_dt = datetime.fromisoformat(self.current_replay_timestamp)
         window_start = (target_dt - timedelta(minutes=window_minutes)).strftime("%Y-%m-%d %H:%M:%S")
 
-        # Fetch all rows in the window up to and including the target
-        rows = self._execute_select_all(
-            "SELECT data FROM replay_data WHERE timestamp >= ? AND id <= ? ORDER BY id",
+        # Fetch only the row ids in the window first. Selecting just the id lets SQLite
+        # answer from the timestamp index without reading the (large) data blobs, so rows
+        # we've already decompressed on a previous step cost nothing here.
+        id_rows = self._execute_select_all(
+            "SELECT id FROM replay_data WHERE timestamp >= ? AND id <= ? ORDER BY id",
             (window_start, target_id),
         )
+        window_ids = [row[0] for row in id_rows]
 
-        # Extract just the metric_manager data from each row
+        # Keep at least twice the current window so a single window always fits and
+        # back-and-forth navigation stays warm; this cap is shared with the warm-on-load
+        # path (_remember_metric_manager) so both agree on what to evict.
+        self._metric_window_cap = max(self.METRIC_WINDOW_CACHE_SIZE, len(window_ids) * 2)
+
+        # Decompress only the rows we haven't cached yet (typically just the new front
+        # edge when stepping back, or the whole window on the first non-sequential jump).
+        missing_ids = [replay_id for replay_id in window_ids if replay_id not in self._metric_window_cache]
+        if missing_ids:
+            self._cache_metric_managers(missing_ids)
+
+        # Build the result oldest-to-newest, marking each window id as recently used so
+        # eviction only ever drops rows outside the current window.
         metrics_list = []
-        for row in rows:
-            try:
-                data = orjson.loads(self._decompressor.decompress(row[0]))
-                metric_manager = data.get("metric_manager", {})
-                if metric_manager:
-                    metrics_list.append(metric_manager)
-            except Exception:
-                continue
+        for replay_id in window_ids:
+            metric_manager = self._metric_window_cache.get(replay_id)
+            if metric_manager is not None:
+                self._metric_window_cache.move_to_end(replay_id)
+                metrics_list.append(metric_manager)
 
         return metrics_list
+
+    def _remember_metric_manager(self, replay_id: int, metric_manager: dict | None) -> None:
+        """Stores a row's metric_manager payload in the bounded window cache.
+
+        Entries are kept most-recently-used last and the oldest are evicted beyond the
+        cap. Row data is immutable for a given id, so cached entries never go stale.
+
+        Args:
+            replay_id: The replay id the payload belongs to.
+            metric_manager: The metric_manager dict to cache (ignored if empty).
+        """
+        if not metric_manager:
+            return
+
+        cache = self._metric_window_cache
+        cache[replay_id] = metric_manager
+        cache.move_to_end(replay_id)
+        while len(cache) > self._metric_window_cap:
+            cache.popitem(last=False)
+
+    def _cache_metric_managers(self, replay_ids: list[int]) -> None:
+        """Decompresses the given replay rows and caches their metric_manager payloads.
+
+        Args:
+            replay_ids: The replay ids whose metric_manager data should be loaded.
+        """
+        # SQLite caps the number of bound parameters per statement, so fetch in chunks.
+        chunk_size = 900
+        for start in range(0, len(replay_ids), chunk_size):
+            chunk = replay_ids[start : start + chunk_size]
+            placeholders = ",".join("?" * len(chunk))
+            rows = self._execute_select_all(
+                f"SELECT id, data FROM replay_data WHERE id IN ({placeholders})",
+                tuple(chunk),
+            )
+            for replay_id, data_blob in rows:
+                try:
+                    data = orjson.loads(self._decompressor.decompress(data_blob))
+                except Exception:
+                    continue
+                self._remember_metric_manager(replay_id, data.get("metric_manager"))
 
     def fetch_global_variable_changes_for_current_replay_id(self):
         """Fetches global variable changes for the current replay ID."""

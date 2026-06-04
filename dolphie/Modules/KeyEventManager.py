@@ -53,6 +53,16 @@ class KeyEventManager:
         self.last_key_time = {}
         self.default_debounce_interval = timedelta(milliseconds=50)
 
+        # Genuine key auto-repeat (holding [ or ]) arrives faster than a human can tap,
+        # so we track the raw inter-event interval to distinguish a held key from manual
+        # clicking. Only a held key accelerates replay Back/Forward. Measured on the raw
+        # stream because the debounce below would otherwise mask the timing difference.
+        self._replay_repeat_keys = {"left_square_bracket", "right_square_bracket"}
+        self._replay_repeat_last_time = None
+        self._replay_key_held = False
+        self.replay_repeat_threshold = timedelta(milliseconds=90)
+        self.replay_release_threshold = timedelta(milliseconds=400)
+
         # Custom debounce intervals for specific keys that trigger expensive operations
         self.key_debounce_intervals = {
             "left_square_bracket": timedelta(milliseconds=100),  # Replay backward
@@ -60,6 +70,30 @@ class KeyEventManager:
             "space": timedelta(milliseconds=300),  # Start worker
             "minus": timedelta(milliseconds=300),  # Remove tab (destructive)
         }
+
+    def _update_replay_held_state(self, key: str, now: datetime) -> None:
+        """Tracks whether a replay nav key ([ or ]) is being held down.
+
+        Genuine key auto-repeat fires faster than a human can tap, so a raw interval at
+        or under ``replay_repeat_threshold`` marks the key as held; a gap longer than
+        ``replay_release_threshold`` clears it. Operates on the raw event stream so the
+        100ms debounce can't mask the timing that distinguishes a hold from fast clicking.
+
+        Args:
+            key: The key that was pressed.
+            now: The timestamp of this raw key event.
+        """
+        if key not in self._replay_repeat_keys:
+            return
+
+        if self._replay_repeat_last_time is not None:
+            raw_interval = now - self._replay_repeat_last_time
+            if raw_interval <= self.replay_repeat_threshold:
+                self._replay_key_held = True
+            elif raw_interval > self.replay_release_threshold:
+                self._replay_key_held = False
+
+        self._replay_repeat_last_time = now
 
     async def process_key_event(self, key: str) -> None:
         """Process a keyboard event and execute the corresponding action.
@@ -76,6 +110,11 @@ class KeyEventManager:
 
         # Apply debouncing to prevent rapid key presses
         now = datetime.now().astimezone()
+
+        # Update held-key state from the raw event stream (before the debounce below can
+        # drop events) so replay nav only accelerates while [ or ] is genuinely held.
+        self._update_replay_held_state(key, now)
+
         debounce_interval = self.key_debounce_intervals.get(key, self.default_debounce_interval)
         last_time = self.last_key_time.get(key, datetime.min.replace(tzinfo=timezone.utc))
 
@@ -261,11 +300,11 @@ class KeyEventManager:
         # Replay control commands
         elif key == "left_square_bracket":
             if dolphie.replay_file:
-                self.app.action_replay_back()
+                self.app.action_replay_back(accelerate=self._replay_key_held)
 
         elif key == "right_square_bracket":
             if dolphie.replay_file:
-                self.app.action_replay_forward()
+                self.app.action_replay_forward(accelerate=self._replay_key_held)
 
         # Tab navigation
         elif key == "ctrl+a" or key == "ctrl+d":
