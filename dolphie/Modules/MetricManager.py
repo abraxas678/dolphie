@@ -1342,11 +1342,12 @@ class MetricManager:
         if not self.datetimes:
             return False
 
-        # datetimes are stored as UTC (see add_metric_datetime); compare against
-        # reference_time converted to UTC to keep the window boundary consistent.
-        threshold = reference_time.astimezone(timezone.utc).replace(tzinfo=None) - timedelta(
-            minutes=self.rolling_window_minutes
-        )
+        # datetimes are stored as UTC (see add_metric_datetime). Live/daemon callers
+        # pass a timezone-aware reference_time (convert to UTC); the replay path passes
+        # a naive datetime already parsed from the recorded UTC strings (use as-is).
+        if reference_time.tzinfo is not None:
+            reference_time = reference_time.astimezone(timezone.utc)
+        threshold = reference_time.replace(tzinfo=None) - timedelta(minutes=self.rolling_window_minutes)
         trimmed = False
 
         while self.datetimes:

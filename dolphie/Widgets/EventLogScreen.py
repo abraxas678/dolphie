@@ -183,7 +183,10 @@ class EventLog(Screen):
 
             self.app.call_from_thread(self._populate_datatable, event_count, data)
         else:
-            self.app.call_from_thread(self._show_error, "No switches selected. Toggle the switches above to filter what events you'd like to see")
+            self.app.call_from_thread(
+                self._show_error,
+                "No switches selected. Toggle the switches above to filter what events you'd like to see",
+            )
 
     def _show_error(self, message: str):
         self.datatable.display = False
@@ -223,11 +226,12 @@ class EventLog(Screen):
                 subsystem = markup_escape(row["subsystem"])
 
                 # Wrap the message to 78% of console width so hopefully we don't get a scrollbar
-                wrapped_message = textwrap.wrap(markup_escape(row["message"]), width=round(self.app.console.width * 0.75))
-                wrapped_message = "\n".join(wrapped_message)
+                wrapped_lines = textwrap.wrap(
+                    markup_escape(row["message"]), width=round(self.app.console.width * 0.75)
+                )
+                wrapped_message = "\n".join(wrapped_lines)
 
-                line_counts = [cell.count("\n") + 1 for cell in wrapped_message]
-                height = max(line_counts)
+                height = max(len(wrapped_lines), 1)
 
                 self.datatable.add_row(timestamp, subsystem, level, error_code, wrapped_message, height=height)
 
