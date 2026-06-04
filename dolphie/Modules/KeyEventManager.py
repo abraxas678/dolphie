@@ -29,7 +29,6 @@ from rich.console import Group
 from rich.style import Style
 from rich.table import Table
 from sqlparse import format as sqlformat
-from textual.widgets import Button
 
 if TYPE_CHECKING:
     from dolphie.App import DolphieApp
@@ -73,6 +72,11 @@ class KeyEventManager:
         """
         tab = self.app.tab_manager.active_tab
         if not tab:
+            return
+
+        # Silently ignore standalone modifier/lock key presses (e.g. Shift when typing
+        # a capital command key) so they don't trip the "not a valid command" warning.
+        if key in self.app.command_manager.ignore_keys:
             return
 
         # Apply debouncing to prevent rapid key presses
@@ -263,11 +267,11 @@ class KeyEventManager:
         # Replay control commands
         elif key == "left_square_bracket":
             if dolphie.replay_file:
-                self.app.query_one("#back_button", Button).press()
+                self.app.action_replay_back()
 
         elif key == "right_square_bracket":
             if dolphie.replay_file:
-                self.app.query_one("#forward_button", Button).press()
+                self.app.action_replay_forward()
 
         # Tab navigation
         elif key == "ctrl+a" or key == "ctrl+d":
@@ -493,7 +497,7 @@ class KeyEventManager:
 
         elif key == "p":
             if dolphie.replay_file:
-                self.app.query_one("#pause_button", Button).press()
+                self.app.action_replay_pause()
             else:
                 if not dolphie.pause_refresh:
                     dolphie.pause_refresh = True
@@ -559,7 +563,7 @@ class KeyEventManager:
 
         elif key == "S":
             if dolphie.replay_file:
-                self.app.query_one("#seek_button", Button).press()
+                self.app.action_replay_seek()
 
         elif key == "t":
             if dolphie.connection_source == ConnectionSource.proxysql:

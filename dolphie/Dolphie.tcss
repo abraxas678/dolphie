@@ -294,6 +294,14 @@ TopBar {
         border: none;
         tint: transparent 0%;
     }
+
+    /* Boundary-disabled (start/end of replay): dim and non-interactive */
+    &:disabled {
+        color: #4a4f5e;
+        text-style: none;
+        background: transparent;
+        tint: transparent 0%;
+    }
 }
 
 /* --- Panels (Graphs, Replication, Replicas) --- */

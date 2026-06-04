@@ -43,7 +43,7 @@ from rich.traceback import Traceback
 from textual import events, on, work
 from textual.app import App
 from textual.theme import Theme as TextualTheme
-from textual.widgets import Button, RadioSet, Switch, TabbedContent, Tabs
+from textual.widgets import RadioSet, Switch, TabbedContent, Tabs
 from textual.worker import Worker
 
 try:
@@ -238,42 +238,56 @@ class DolphieApp(App):
             severity="success",
         )
 
-    @on(Button.Pressed, "#back_button")
-    def replay_back(self):
-        if self.tab_manager.active_tab.replay_manager.seek_to_previous_id():
-            self.force_refresh_for_replay()
+    # Replay playback actions. Both the ReplayControls buttons and the keyboard
+    # shortcuts in KeyEventManager route through these so there's a single code path.
+    def action_replay_back(self):
+        tab = self.tab_manager.active_tab
+        if not tab or not tab.dolphie.replay_file:
+            return
 
-    @on(Button.Pressed, "#forward_button")
-    def replay_forward(self):
+        if tab.replay_manager.seek_to_previous_id():
+            self.force_refresh_for_replay()
+        else:
+            self.notify("You're already at the beginning of the replay", severity="warning")
+
+    def action_replay_forward(self):
+        tab = self.tab_manager.active_tab
+        if not tab or not tab.dolphie.replay_file:
+            return
+
+        if tab.replay_manager.current_replay_id >= tab.replay_manager.max_replay_id:
+            self.notify("You're already at the end of the replay", severity="warning")
+            return
+
         self.force_refresh_for_replay()
 
-    @on(Button.Pressed, "#pause_button")
-    def replay_pause(self, event: Button.Pressed):
+    def action_replay_pause(self):
         tab = self.tab_manager.active_tab
+        if not tab or not tab.dolphie.replay_file:
+            return
 
-        if not tab.dolphie.pause_refresh:
-            tab.dolphie.pause_refresh = True
+        tab.dolphie.pause_refresh = not tab.dolphie.pause_refresh
+        tab.replay_controls.paused = tab.dolphie.pause_refresh
+
+        if tab.dolphie.pause_refresh:
             self.notify("Replay is paused")
-            event.button.label = "▶️  Resume"
         else:
-            tab.dolphie.pause_refresh = False
             self.notify("Replay has resumed", severity="success")
-            event.button.label = "⏸️  Pause"
 
-    @on(Button.Pressed, "#seek_button")
-    def replay_seek(self):
+    def action_replay_seek(self):
+        tab = self.tab_manager.active_tab
+        if not tab or not tab.dolphie.replay_file:
+            return
+
         def command_get_input(timestamp: str):
-            if timestamp:
-                found_timestamp = self.tab_manager.active_tab.replay_manager.seek_to_timestamp(timestamp)
+            if timestamp and tab.replay_manager.seek_to_timestamp(timestamp):
+                self.force_refresh_for_replay()
 
-                if found_timestamp:
-                    self.force_refresh_for_replay()
-
-        self.app.push_screen(
+        self.push_screen(
             CommandModal(
                 command=HotkeyCommands.replay_seek,
                 message="What time would you like to seek to?",
-                max_replay_timestamp=self.tab_manager.active_tab.replay_manager.max_replay_timestamp,
+                max_replay_timestamp=tab.replay_manager.max_replay_timestamp,
             ),
             command_get_input,
         )
@@ -302,6 +316,10 @@ class DolphieApp(App):
         self.tab_manager.switch_tab(event.tab.id, set_active=False)
 
         tab = self.tab_manager.active_tab
+        # Sync the (shared) replay controls to the newly-active tab's pause state
+        # immediately so the button label doesn't briefly show the previous tab's state.
+        if tab and tab.dolphie.replay_file:
+            tab.replay_controls.paused = tab.dolphie.pause_refresh
         if (
             tab
             and tab.worker

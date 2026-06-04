@@ -8,6 +8,7 @@ from dolphie.Dolphie import Dolphie
 from dolphie.Modules.ArgumentParser import Config, HostGroupMember
 from dolphie.Modules.ManualException import ManualException
 from dolphie.Modules.ReplayManager import ReplayManager
+from dolphie.Widgets.ReplayControls import ReplayControls
 from dolphie.Widgets.SpinnerWidget import SpinnerWidget
 from dolphie.Widgets.TabSetupModal import TabSetupModal
 from dolphie.Widgets.TopBar import TopBar
@@ -23,7 +24,6 @@ from textual.containers import (
 from textual.content import Content
 from textual.timer import Timer
 from textual.widgets import (
-    Button,
     DataTable,
     Label,
     LoadingIndicator,
@@ -115,7 +115,8 @@ class Tab:
         self.proxysql_command_stats_title = app.query_one("#proxysql_command_stats_title", Static)
         self.proxysql_command_stats_datatable = app.query_one("#proxysql_command_stats_datatable", DataTable)
 
-        self.dashboard_replay_container = app.query_one("#dashboard_replay_container", Container)
+        self.replay_controls = app.query_one(ReplayControls)
+        self.dashboard_replay_container = self.replay_controls
         self.dashboard_replay_progressbar = app.query_one("#dashboard_replay_progressbar", ProgressBar)
         self.dashboard_replay_start_end = app.query_one("#dashboard_replay_start_end", Static)
         self.dashboard_replay = app.query_one("#dashboard_replay", Static)
@@ -187,6 +188,14 @@ class Tab:
             current_position = self.replay_manager.current_replay_id - self.replay_manager.min_replay_id + 1
 
         self.dashboard_replay_progressbar.update(progress=current_position, total=self.replay_manager.total_replay_rows)
+
+        # Keep the controls in sync with the active tab: reflect this tab's pause state
+        # and disable Back/Forward at the boundaries so they reflect what's possible.
+        self.replay_controls.paused = self.dolphie.pause_refresh
+        self.replay_controls.set_boundary_states(
+            at_start=self.replay_manager.current_replay_id <= self.replay_manager.min_replay_id,
+            at_end=self.replay_manager.current_replay_id >= self.replay_manager.max_replay_id,
+        )
 
     def toggle_entities_displays(self):
         def toggle_tab(tab_name, visible):
@@ -338,22 +347,7 @@ class TabManager:
             VerticalScroll(
                 SpinnerWidget(id="spinner", text="Processing command"),
                 Center(
-                    Container(
-                        Static(id="dashboard_replay", classes="dashboard_replay"),
-                        Static(id="dashboard_replay_start_end", classes="dashboard_replay"),
-                        Horizontal(
-                            Button("⏪ Back", id="back_button", classes="replay_button"),
-                            Button("⏸️  Pause", id="pause_button", classes="replay_button"),
-                            Button("⏩ Forward", id="forward_button", classes="replay_button"),
-                            Button("🔍 Seek", id="seek_button", classes="replay_button"),
-                            classes="replay_buttons",
-                        ),
-                        ProgressBar(
-                            id="dashboard_replay_progressbar", total=100, show_percentage=False, show_eta=False
-                        ),
-                        id="dashboard_replay_container",
-                        classes="dashboard_replay",
-                    )
+                    ReplayControls(id="dashboard_replay_container", classes="dashboard_replay"),
                 ),
                 Container(
                     Center(
