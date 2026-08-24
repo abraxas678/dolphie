@@ -5,29 +5,31 @@ import os
 import socket
 import time
 from datetime import datetime
+from typing import TYPE_CHECKING, Any
+
+import psutil
+from loguru import logger
+from packaging.version import InvalidVersion
+from packaging.version import parse as parse_version
 
 import dolphie.DataTypes as DataTypes
 import dolphie.Modules.MetricManager as MetricManager
-import psutil
 from dolphie.Modules.ArgumentParser import Config
-from dolphie.Modules.Functions import load_host_cache_file
+from dolphie.Modules.Functions import coerce_int, coerce_str, load_host_cache_file
 from dolphie.Modules.MySQL import ConnectionSource, Database
 from dolphie.Modules.PerformanceSchemaMetrics import PerformanceSchemaMetrics
 from dolphie.Modules.Queries import MySQLQueries
-from loguru import logger
-from packaging.version import InvalidVersion, parse as parse_version
-from rich.text import Text
-from textual.app import App
-from textual.widgets import Switch
+from dolphie.Modules.Theme import themed_content
+
+if TYPE_CHECKING:
+    from dolphie.App import DolphieApp
 
 
 class Dolphie:
-    def __init__(self, config: Config, app: App) -> None:
+    def __init__(self, config: Config, app: DolphieApp) -> None:
         self.config = config
         self.app = app
         self.app_version = config.app_version
-
-        self.tab_id: str = None
 
         # Config options
         self.credential_profile = config.credential_profile
@@ -39,7 +41,7 @@ class Dolphie:
         self.ssl = config.ssl
         self.host_cache_file = config.host_cache_file
         self.tab_setup_file = config.tab_setup_file
-        self.refresh_interval = config.refresh_interval
+        self.refresh_interval: float = config.refresh_interval
         self.graph_window_minutes = config.graph_window_minutes
         self.show_trxs_only = config.show_trxs_only
         self.show_threads_with_concurrency_tickets = False
@@ -73,32 +75,35 @@ class Dolphie:
         self.reset_runtime_variables()
 
     def reset_runtime_variables(self):
+        visibility = self.metric_manager.snapshot_visibility() if hasattr(self, "metric_manager") else {}
         self.metric_manager = MetricManager.MetricManager(
-            self.replay_file, self.daemon_mode, self.graph_window_minutes
+            self.replay_file,
+            rolling_window_minutes=self.graph_window_minutes,
         )
+        self.metric_manager.restore_visibility(visibility)
         self.replica_manager = DataTypes.ReplicaManager()
 
         self.dolphie_start_time: datetime = datetime.now().astimezone()
         self.worker_previous_start_time: datetime = datetime.now().astimezone()
         self.worker_processing_time: float = 0
         self.polling_latency: float = 0
-        self.connection_status: DataTypes.ConnectionStatus = None
+        self.connection_status: DataTypes.ConnectionStatusType | None = None
 
         self.global_variables: dict[str, int | str] = {}
-        self.global_status: dict[str, int | str] = {}
-        self.binlog_status: dict[str, int | str] = {}
-        self.replication_status: list[dict[str, int | str]] = []
-        self.replication_applier_status: dict[str, list[dict[str, int | str]] | int] = {}
+        self.global_status: dict[str, int | float | str] = {}
+        self.binlog_status: DataTypes.DatabaseRow = {}
+        self.replication_status: list[DataTypes.DatabaseRow] = []
+        self.replication_applier_status: dict[str, dict[str, Any]] = {}
         self.innodb_metrics: dict[str, int | str] = {}
-        self.metadata_locks: list[dict[str, int | str]] = []
-        self.ddl: list[dict[str, int | str]] = []
+        self.metadata_locks: list[DataTypes.DatabaseRow] = []
+        self.ddl: list[DataTypes.DatabaseRow] = []
         self.disk_io_metrics: dict[str, int | str] = {}
         self.statements_summary_metrics: dict[str, int | str] = {}
-        self.system_utilization: dict[str, int | str] = {}
+        self.system_utilization: dict[str, int | float | tuple[float, float, float]] = {}
         self.host_cache: dict[str, str] = {}
-        self.proxysql_hostgroup_summary: list[dict[str, str]] = []
-        self.proxysql_mysql_query_rules: list[dict[str, str]] = []
-        self.proxysql_per_second_data: dict[str, int | str] = {}
+        self.proxysql_hostgroup_summary: list[DataTypes.DatabaseRow] = []
+        self.proxysql_mysql_query_rules: list[DataTypes.DatabaseRow] = []
+        self.proxysql_per_second_data: dict[str, dict[str, int]] = {}
         self.proxysql_command_stats: list[dict[str, int | str]] = []
         self.processlist_threads: dict[int, DataTypes.ProcesslistThread | DataTypes.ProxySQLProcesslistThread] = {}
         self.processlist_threads_snapshot: dict[
@@ -107,28 +112,28 @@ class Dolphie:
 
         # These are for group replication in replication panel
         self.is_group_replication_primary: bool = False
-        self.group_replication_data: dict[str, str] = {}
-        self.group_replication_members: list[dict[str, str]] = []
-        self.clusterset_instances: list[dict[str, str]] = []
+        self.group_replication_data: DataTypes.DatabaseRow = {}
+        self.group_replication_members: list[DataTypes.DatabaseRow] = []
+        self.clusterset_instances: list[DataTypes.DatabaseRow] = []
 
-        self.galera_cluster_members: list[dict[str, str]] = []
+        self.galera_cluster_members: list[DataTypes.DatabaseRow] = []
 
         # Filters that can be applied. String filters support a leading ! to exclude matches.
         # They start as whatever the filters option is set to, if anything
         filters = self.config.filter_values
-        self.user_filter: str = filters.get("user")
-        self.db_filter: str = filters.get("db")
-        self.host_filter: str = filters.get("host")
-        self.query_filter: str = filters.get("query")
-        self.hostgroup_filter: str = filters.get("hostgroup")
-        self.query_time_filter: int = filters.get("time")
+        self.user_filter: str | None = filters.get("user")
+        self.db_filter: str | None = filters.get("db")
+        self.host_filter: str | None = filters.get("host")
+        self.query_filter: str | None = filters.get("query")
+        self.hostgroup_filter: str | None = filters.get("hostgroup")
+        self.query_time_filter: int | None = filters.get("time")
 
         # Values seen in the processlist, so the filter dropdowns can offer ones being filtered out
         self.filter_dropdown_values: dict[str, set] = {field: set() for field in ("user", "db", "host", "hostgroup")}
 
         # Types of hosts
-        self.connection_source: ConnectionSource = ConnectionSource.mysql  # mysql, proxysql
-        self.connection_source_alt: ConnectionSource = ConnectionSource.mysql  # mariadb
+        self.connection_source: DataTypes.ConnectionSourceType = ConnectionSource.mysql  # mysql, proxysql
+        self.connection_source_alt: DataTypes.ConnectionSourceType = ConnectionSource.mysql  # mariadb
         self.galera_cluster: bool = False
         self.group_replication: bool = False
         self.innodb_cluster: bool = False
@@ -136,46 +141,33 @@ class Dolphie:
         self.replicaset: bool = False
 
         # Main connection is used for Textual's worker thread so it can run asynchronous
-        db_connection_args = {
-            "app": self.app,
-            "host": self.host,
-            "user": self.user,
-            "password": self.password,
-            "socket": self.socket,
-            "port": self.port,
-            "ssl": self.ssl,
-            "auto_connect": False,
-            "daemon_mode": self.daemon_mode,
-        }
-        self.main_db_connection = Database(**db_connection_args)
+        self.main_db_connection = self._create_connection()
         # Secondary connection is for ad-hoc commands that are not a part of the worker thread
-        self.secondary_db_connection = Database(**db_connection_args, save_connection_id=False)
+        self.secondary_db_connection = self._create_connection(save_connection_id=False)
 
         # Misc variables
         self.host_distro: str = "MySQL"
         self.host_with_port: str = f"{self.host}:{self.port}"
         self.performance_schema_enabled: bool = False
         self.use_performance_schema_for_processlist: bool = False
-        self.server_uuid: str = None
-        self.replication_source_uuids: set = set()
-        self.host_version: str = None
+        self.server_uuid: str | int | None = None
+        self.replication_source_uuids: set[str] = set()
+        self.host_version: str | None = None
         self.pause_refresh: bool = False
-        self.active_redo_logs: int = None
+        self.active_redo_logs: int | None = None
         self.metadata_locks_enabled: bool = False
 
         self.host_cache_from_file = load_host_cache_file(self.host_cache_file)
 
-        self.file_io_data: PerformanceSchemaMetrics = None
-        self.table_io_waits_data: PerformanceSchemaMetrics = None
-        self.statements_summary_data: PerformanceSchemaMetrics = None
+        self.file_io_data: PerformanceSchemaMetrics | None = None
+        self.table_io_waits_data: PerformanceSchemaMetrics | None = None
+        self.statements_summary_data: PerformanceSchemaMetrics | None = None
 
         if self.record_for_replay or self.panels.pfs_metrics.visible:
-            self.pfs_metrics_last_reset_time: datetime = datetime.now().astimezone()
+            self.pfs_metrics_last_reset_time: datetime | None = datetime.now().astimezone()
         else:
             # This will be set when user presses key to bring up panel
-            self.pfs_metrics_last_reset_time: datetime = None
-
-        self.update_switches_after_reset()
+            self.pfs_metrics_last_reset_time = None
 
         try:
             # Get the IP address of the monitored host
@@ -189,12 +181,29 @@ class Dolphie:
         except socket.gaierror:
             self.enable_system_utilization = False
 
+    def _create_connection(self, save_connection_id: bool = True) -> Database:
+        return Database(
+            app=self.app,
+            host=self.host,
+            user=self.user,
+            password=self.password,
+            socket=self.socket,
+            port=self.port,
+            ssl=self.ssl,
+            save_connection_id=save_connection_id,
+            auto_connect=False,
+            daemon_mode=self.daemon_mode,
+        )
+
     def db_connect(self):
         self.main_db_connection.connect()
         if not self.daemon_mode:
             self.secondary_db_connection.connect()
 
-        self.connection_source = self.main_db_connection.source
+        connection_source = self.main_db_connection.source
+        if connection_source is None:
+            raise RuntimeError("Database connection did not report a connection source")
+        self.connection_source = connection_source
         self.connection_source_alt = self.connection_source
         if self.connection_source == ConnectionSource.proxysql:
             self.host_distro = ConnectionSource.proxysql
@@ -249,10 +258,10 @@ class Dolphie:
 
     def determine_distro_and_connection_source_alt(
         self, global_variables: dict[str, int | str]
-    ) -> tuple[str, ConnectionSource]:
-        is_percona = "percona" in global_variables.get("version_comment", "").casefold()
+    ) -> tuple[str, DataTypes.ConnectionSourceType]:
+        is_percona = "percona" in coerce_str(global_variables.get("version_comment")).casefold()
         is_mariadb = any(variable.startswith("aria_") for variable in global_variables)
-        is_rds = "rdsdb" in self.global_variables.get("basedir", "").casefold()
+        is_rds = "rdsdb" in coerce_str(self.global_variables.get("basedir")).casefold()
         is_aurora = self.global_variables.get("aurora_version")
         is_azure = self.global_variables.get("aad_auth_only")
         is_galera_cluster = self.galera_cluster
@@ -284,7 +293,7 @@ class Dolphie:
         return "MySQL", ConnectionSource.mysql
 
     def build_kill_query(self, thread_id: int) -> str:
-        is_rds = "rdsdb" in self.global_variables.get("basedir", "").casefold()
+        is_rds = "rdsdb" in coerce_str(self.global_variables.get("basedir")).casefold()
         is_aurora = self.global_variables.get("aurora_version")
         is_azure = self.global_variables.get("aad_auth_only")
 
@@ -308,7 +317,7 @@ class Dolphie:
 
         self.system_utilization = {
             "Uptime": int(time.time() - psutil.boot_time()),
-            "CPU_Count": psutil.cpu_count(logical=True),
+            "CPU_Count": psutil.cpu_count(logical=True) or 0,
             "CPU_Percent": psutil.cpu_percent(interval=0),
             "Memory_Total": virtual_memory.total,
             "Memory_Used": virtual_memory.used,
@@ -316,8 +325,8 @@ class Dolphie:
             "Swap_Used": swap_memory.used,
             "Network_Up": network_io.bytes_sent,
             "Network_Down": network_io.bytes_recv,
-            "Disk_Read": disk_io.read_count,
-            "Disk_Write": disk_io.write_count,
+            "Disk_Read": disk_io.read_count if disk_io else 0,
+            "Disk_Write": disk_io.write_count if disk_io else 0,
         }
 
         # Include the load average if it's available
@@ -350,7 +359,7 @@ class Dolphie:
                 file.write(host)
                 self.tab_setup_available_hosts.append(host[:-1])  # remove the \n
 
-    def is_mysql_version_at_least(self, target: str, use_version: str = None):
+    def is_mysql_version_at_least(self, target: str, use_version: str | None = None):
         version = use_version or self.host_version
         if not version:
             return False
@@ -397,25 +406,13 @@ class Dolphie:
                 value = getattr(thread, field, None)
 
                 # Skip values that aren't real, such as the N/A placeholder threads get when empty
-                if value and not str(value).startswith("["):
+                if value and not (isinstance(value, str) and value.startswith("[")):
                     values.add(value)
-
-    def update_switches_after_reset(self):
-        # Set the graph switches to what they're currently selected to after a reset
-        switches = self.app.query(f".switch_container_{self.tab_id} Switch")
-        for switch in switches:
-            switch: Switch
-            metric_instance_name = switch.name
-            metric = switch.id
-
-            metric_instance = getattr(self.metric_manager.metrics, metric_instance_name)
-            metric_data: MetricManager.MetricData = getattr(metric_instance, metric)
-            metric_data.visible = switch.value
 
     def determine_proxysql_refresh_interval(self) -> float:
         # If we have a lot of client connections, increase the refresh interval based on the
         # proxysql process execution time. René asked for this to be added to reduce load on ProxySQL
-        client_connections = self.global_status.get("Client_Connections_connected", 0)
+        client_connections = coerce_int(self.global_status.get("Client_Connections_connected"))
         if client_connections > 30000:
             percentage = 0.60
         elif client_connections > 20000:
@@ -478,10 +475,10 @@ class Dolphie:
                                 if len(entry.name) >= 30 and "_" in entry.name:
                                     port = "_" + entry.name.rsplit("_", 1)[-1]
 
-                                formatted_replay_name = f"[label]{host_name}{port}[/label]"
-                                formatted_replay_name += f": [b light_blue]{file.name}[/b light_blue]"
+                                formatted_replay_name = f"[$label]{host_name}{port}[/$label]"
+                                formatted_replay_name += f": [$b_light_blue]{file.name}[/$b_light_blue]"
 
-                                replay_files.append((file.path, Text.from_markup(formatted_replay_name)))
+                                replay_files.append((file.path, themed_content(formatted_replay_name)))
         except OSError as e:
             self.app.notify(str(e), title="Error getting replay files", severity="error")
 
@@ -499,13 +496,13 @@ class Dolphie:
                 instance.internal_data = {}
                 instance.filtered_data = {}
             else:
-                for data in (instance.internal_data, instance.filtered_data):
-                    for file_data in data.values():
-                        for metric_data in file_data.get("metrics", file_data).values():
-                            # For filtered_data so replay data is smaller in size
-                            if "d" in metric_data:
-                                metric_data["d"] = 0
-                            elif "delta" in metric_data:
-                                metric_data["delta"] = 0
+                for file_data in instance.internal_data.values():
+                    for metric_data in file_data["metrics"].values():
+                        metric_data["delta"] = 0
+
+                for file_data in instance.filtered_data.values():
+                    for metric_data in file_data.values():
+                        if isinstance(metric_data, dict) and "d" in metric_data:
+                            metric_data["d"] = 0
 
         self.pfs_metrics_last_reset_time = datetime.now().astimezone()

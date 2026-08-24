@@ -1,4 +1,7 @@
+from __future__ import annotations
+
 import re
+from collections.abc import Mapping
 
 from textual import on
 from textual.app import ComposeResult
@@ -7,8 +10,8 @@ from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Button, Checkbox, Input, Label, Rule, Select, Static
 
-from dolphie.DataTypes import ConnectionSource, HotkeyCommands
-from dolphie.Modules.Functions import parse_filter
+from dolphie.DataTypes import BaseProcesslistThread, ConnectionSource, HotkeyCommands
+from dolphie.Modules.Functions import is_valid_integer_filter, parse_filter
 from dolphie.Widgets.AutoComplete import AutoComplete, DropdownItem, TargetState
 
 
@@ -91,29 +94,29 @@ class CommandModal(ModalScreen):
 
     def __init__(
         self,
-        command,
-        message,
-        connection_source: ConnectionSource = None,
-        processlist_data=None,
-        maximize_panel_options=None,
-        host_cache_data=None,
-        max_replay_timestamp=None,
-        current_filters=None,
-        filter_dropdown_values=None,
+        command: str,
+        message: str,
+        connection_source: str | None = None,
+        processlist_data: Mapping[int, BaseProcesslistThread] | Mapping[str, BaseProcesslistThread] | None = None,
+        maximize_panel_options: list[tuple[str, str]] | None = None,
+        host_cache_data: Mapping[str, str] | None = None,
+        max_replay_timestamp: str | None = None,
+        current_filters: Mapping[str, str | int | None] | None = None,
+        filter_dropdown_values: Mapping[str, set] | None = None,
     ):
         super().__init__()
         self.command = command
         self.message = message
         self.connection_source = connection_source
-        self.processlist_data = processlist_data
-        self.host_cache_data = host_cache_data
+        self.processlist_data = {str(thread_id): thread for thread_id, thread in (processlist_data or {}).items()}
+        self.host_cache_data = host_cache_data or {}
         self.max_replay_timestamp = max_replay_timestamp
         self.current_filters = current_filters or {}
         self.filter_dropdown_values = filter_dropdown_values or {}
 
         self.dropdown_items = []
-        if processlist_data:
-            sorted_keys = sorted(processlist_data.keys(), key=lambda x: int(x))
+        if self.processlist_data:
+            sorted_keys = sorted(self.processlist_data, key=int)
             self.dropdown_items = [DropdownItem(thread_id) for thread_id in sorted_keys]
 
         self.maximize_panel_select_options = maximize_panel_options or []
@@ -210,21 +213,21 @@ class CommandModal(ModalScreen):
             self.query_one("#filter_by_db_dropdown_items", AutoComplete).candidates = self.create_dropdown_items(
                 "db", include_filtered_out=True
             )
-            self.query_one("#filter_by_query_time_input", Input).border_title = (
-                "Minimum Query Time [$dark_gray](seconds)"
-            )
-            self.query_one("#filter_by_query_text_input", Input).border_title = (
-                "Partial Query Text [$dark_gray](case-sensitive)"
-            )
+            self.query_one(
+                "#filter_by_query_time_input", Input
+            ).border_title = "Minimum Query Time [$dark_gray](seconds)"
+            self.query_one(
+                "#filter_by_query_text_input", Input
+            ).border_title = "Partial Query Text [$dark_gray](case-sensitive)"
 
             if self.connection_source != ConnectionSource.proxysql:
                 self.query_one("#filter_by_hostgroup_input", Input).display = False
             else:
                 self.query_one("#filter_by_host_input", Input).border_title = "Backend Host/IP"
                 self.query_one("#filter_by_hostgroup_input", Input).border_title = "Hostgroup"
-                self.query_one("#filter_by_hostgroup_dropdown_items", AutoComplete).candidates = (
-                    self.create_dropdown_items("hostgroup", include_filtered_out=True)
-                )
+                self.query_one(
+                    "#filter_by_hostgroup_dropdown_items", AutoComplete
+                ).candidates = self.create_dropdown_items("hostgroup", include_filtered_out=True)
 
             # Show the filters in effect so they can be changed/removed instead of retyped
             for field, filter_value in self.current_filters.items():
@@ -246,9 +249,9 @@ class CommandModal(ModalScreen):
             self.query_one("#kill_by_host_input", Input).border_title = "Host/IP"
             self.query_one("#kill_by_host_dropdown_items", AutoComplete).candidates = self.create_dropdown_items("host")
             self.query_one("#kill_by_age_range_input", Input).border_title = "Age Range [$dark_gray](seconds)"
-            self.query_one("#kill_by_query_text_input", Input).border_title = (
-                "Partial Query Text [$dark_gray](case-sensitive)"
-            )
+            self.query_one(
+                "#kill_by_query_text_input", Input
+            ).border_title = "Partial Query Text [$dark_gray](case-sensitive)"
 
             sleeping_queries_checkbox = self.query_one("#sleeping_queries", Checkbox)
             sleeping_queries_checkbox.toggle()
@@ -339,11 +342,11 @@ class CommandModal(ModalScreen):
                 return
 
             # Validate numeric fields (hostgroup can be prefixed with ! to exclude it)
-            for value, field_name, pattern in [
-                (filters["query_time"], "Query time", r"^\d+$"),
-                (filters["hostgroup"], "Hostgroup", r"^!?\d+$"),
+            for value, field_name, allow_negation in [
+                (filters["query_time"], "Query time", False),
+                (filters["hostgroup"], "Hostgroup", True),
             ]:
-                if value and not re.search(pattern, value):
+                if value and not is_valid_integer_filter(value, allow_negation=allow_negation):
                     self.update_error_response(f"{field_name} must be an integer")
                     return
 

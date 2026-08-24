@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import re
 from decimal import Decimal
+from math import isfinite
 
 import charset_normalizer
 from pygments.style import Style
@@ -19,11 +20,16 @@ from pygments.token import (
     Whitespace,
 )
 from rich.markup import escape as markup_escape
-from rich.syntax import Syntax
+from rich.syntax import PygmentsSyntaxTheme, Syntax
+
+from dolphie.Modules.Theme import SURFACE
+
+Numeric = int | float | Decimal
+NumericInput = Numeric | str
 
 
 class NordModifiedTheme(Style):
-    nord0 = "#0f1525"
+    nord0 = SURFACE
     nord1 = "#3b4252"
     nord2 = "#434c5e"
     nord3 = "#4c566a"
@@ -92,13 +98,16 @@ class NordModifiedTheme(Style):
     }
 
 
+NORD_MODIFIED_THEME = PygmentsSyntaxTheme(NordModifiedTheme)
+
+
 def format_query(query: str, minify: bool = True) -> Syntax:
     if not query:
-        return Syntax(code="", lexer="sql", word_wrap=True, theme=NordModifiedTheme)
+        return Syntax(code="", lexer="sql", word_wrap=True, theme=NORD_MODIFIED_THEME)
 
     query = markup_escape(re.sub(r"\s+", " ", query)) if minify else query
 
-    formatted_query = Syntax(code=query, lexer="sql", word_wrap=True, theme=NordModifiedTheme)
+    formatted_query = Syntax(code=query, lexer="sql", word_wrap=True, theme=NORD_MODIFIED_THEME)
 
     return formatted_query
 
@@ -110,7 +119,50 @@ def minify_query(query: str) -> str:
     return markup_escape(re.sub(r"\s+", " ", query))
 
 
-def format_bytes(bytes_value, color=True, decimal=2):
+def coerce_int(value: object, default: int = 0) -> int:
+    """Return an integer for a database scalar, falling back for invalid values."""
+    if value is None or value == "":
+        return default
+
+    try:
+        if isinstance(value, (str, bytes, bytearray, int, float, Decimal)):
+            return int(value)
+    except (TypeError, ValueError, OverflowError):
+        pass
+    return default
+
+
+def coerce_float(value: object, default: float = 0.0) -> float:
+    """Return a float for a database scalar, falling back for invalid values."""
+    if value is None or value == "":
+        return default
+
+    try:
+        if isinstance(value, (str, bytes, bytearray, int, float, Decimal)):
+            converted = float(value)
+            return converted if isfinite(converted) else default
+    except (TypeError, ValueError, OverflowError):
+        pass
+    return default
+
+
+def coerce_str(value: object, default: str = "") -> str:
+    """Return text for a database scalar without rendering null as ``None``."""
+    return default if value is None else str(value)
+
+
+def host_without_port(address: str) -> str:
+    """Return the host portion of a MySQL host or host:port value."""
+    if address.startswith("[") and "]" in address:
+        return address[1 : address.index("]")]
+    if address.count(":") > 1:
+        return address
+
+    host, separator, port = address.rpartition(":")
+    return host if separator and port.isdigit() else address
+
+
+def format_bytes(bytes_value: Numeric | str, color: bool = True, decimal: int = 2) -> str:
     if isinstance(bytes_value, str):
         return bytes_value
 
@@ -131,12 +183,12 @@ def format_bytes(bytes_value, color=True, decimal=2):
     if bytes_value == 0:
         return "0"
     elif color:
-        return f"{formatted_value}[highlight]{units[unit_index]}[/highlight]"
+        return f"{formatted_value}[$highlight]{units[unit_index]}[/$highlight]"
     else:
         return f"{formatted_value}{units[unit_index]}"
 
 
-def format_time(time: int, picoseconds=False):
+def format_time(time: int | float | None, picoseconds: bool = False) -> str:
     if time is None:
         return "N/A"
 
@@ -148,7 +200,7 @@ def format_time(time: int, picoseconds=False):
     return f"{int(hours):02d}:{int(minutes):02d}:{int(seconds):02d}"
 
 
-def format_picoseconds(ps: int) -> str:
+def format_picoseconds(ps: Numeric) -> str:
     units = [
         ("d", 24 * 60 * 60 * 1_000_000_000_000),  # days
         ("h", 60 * 60 * 1_000_000_000_000),  # hours
@@ -163,12 +215,12 @@ def format_picoseconds(ps: int) -> str:
     for unit, factor in units:
         if ps >= factor:
             value = ps / factor
-            return f"{value:.2f}[highlight]{unit}"
-    return "[dark_gray]0"
+            return f"{value:.2f}[$highlight]{unit}"
+    return "[$dark_gray]0"
 
 
-def load_host_cache_file(host_cache_file: str):
-    host_cache = {}
+def load_host_cache_file(host_cache_file: str) -> dict[str, str]:
+    host_cache: dict[str, str] = {}
     if os.path.exists(host_cache_file):
         with open(host_cache_file) as file:
             for line in file:
@@ -190,11 +242,11 @@ def load_host_cache_file(host_cache_file: str):
     return host_cache
 
 
-def detect_encoding(text):
+def detect_encoding(text: bytes | bytearray) -> str:
     # Since BLOB/BINARY data can be involved, we need to auto-detect what the encoding is
     # for queries since it can be anything. If I let pymsql use unicode by default I got
     # consistent crashes due to unicode errors for utf8 so we have to go this route
-    result = charset_normalizer.detect(text)
+    result = charset_normalizer.detect(bytes(text))
     encoding = result["encoding"]
 
     if encoding is None:
@@ -205,13 +257,13 @@ def detect_encoding(text):
     return encoding
 
 
-def round_num(n, decimal=2):
+def round_num(n: NumericInput, decimal: int = 2) -> Decimal:
     n = Decimal(n)
     return n.to_integral() if n == n.to_integral() else round(n.normalize(), decimal)
 
 
 # This is from https://pypi.org/project/numerize
-def format_number(n, decimal=2, color=True):
+def format_number(n: NumericInput | None, decimal: int = 2, color: bool = True) -> str:
     if not n or n == "0":
         return "0"
 
@@ -238,18 +290,20 @@ def format_number(n, decimal=2, color=True):
         except ValueError:
             return n
 
-    n = abs(n)
-    for x in range(len(sci_expr)):
-        if n >= sci_expr[x] and n < sci_expr[x + 1]:
+    n = float(abs(n))
+    for x in range(len(sci_expr) - 1):
+        if sci_expr[x] <= n < sci_expr[x + 1]:
             sufix = sufixes[x]
             num = str(round_num(n / sci_expr[x], decimal)) if n >= 1000.0 else str(round_num(n, 0))
             if color:
-                return f"{num}[highlight]{sufix}[/highlight]" if sufix else num
+                return f"{num}[$highlight]{sufix}[/$highlight]" if sufix else num
             else:
                 return f"{num}{sufix}" if sufix else num
 
+    return str(round_num(n, decimal))
 
-def format_sys_table_memory(data):
+
+def format_sys_table_memory(data: str) -> str:
     parsed_data = data.strip().split(" ")
     if len(parsed_data) == 2:
         value, suffix = parsed_data[0], parsed_data[1][:1]
@@ -261,7 +315,7 @@ def format_sys_table_memory(data):
         elif suffix == "b":
             suffix = "B"
 
-        return f"{value}[highlight]{suffix}"
+        return f"{value}[$highlight]{suffix}"
 
     return data
 
@@ -276,6 +330,20 @@ def escape_markup(text: str) -> str:
         str: The escaped text.
     """
     return text.replace("[", r"\[")
+
+
+def is_valid_integer_filter(filter_value: str, allow_negation: bool = False) -> bool:
+    """Check whether a filter value is a plain integer, optionally allowing a leading ! negation.
+
+    Args:
+        filter_value (str): The filter value as the user typed it.
+        allow_negation (bool): Whether a leading ! (excluding the value) is permitted.
+
+    Returns:
+        bool: True if the value is a valid integer filter.
+    """
+    pattern = r"^!?\d+$" if allow_negation else r"^\d+$"
+    return bool(re.search(pattern, filter_value))
 
 
 def parse_filter(filter_value: str) -> tuple[str, bool]:
@@ -329,7 +397,7 @@ def filter_excludes(filter_value: str, thread_value: str, partial: bool = False)
     return matched if negate else not matched
 
 
-def filter_sql_condition(columns: str | list[str], filter_value: str, pattern: str = None) -> str:
+def filter_sql_condition(columns: str | list[str], filter_value: str, pattern: str | None = None) -> str:
     """Build a WHERE clause condition for a filter value, honoring ! negation.
 
     Args:

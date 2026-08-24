@@ -1,5 +1,8 @@
 __pycache__/
+.venv/
 dist/
+docker/
+docker-release.sh
 
 .idea
 .history

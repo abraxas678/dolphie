@@ -5,61 +5,64 @@ import re
 import sys
 from configparser import RawConfigParser
 from dataclasses import dataclass, field, fields
+from typing import NoReturn
 from urllib.parse import ParseResult, urlparse
 
 import myloginpath
 from rich import box
 from rich.console import Console
-from rich.table import Table
-from rich.theme import Theme
 
 from dolphie.DataTypes import Panels
-from dolphie.Modules.Functions import merge_filters
+from dolphie.Modules.Functions import is_valid_integer_filter, merge_filters
 from dolphie.Modules.Queries import MySQLQueries
+from dolphie.Modules.Theme import FOREGROUND, themed_text
+from dolphie.Modules.Theme import ThemedTable as Table
+
+SSLValue = str | bool
+SSLConfig = dict[str, SSLValue]
 
 
 @dataclass
 class CredentialProfile:
     name: str
-    host: str = None
-    port: int = None
-    user: str = None
-    password: str = None
-    socket: str = None
-    ssl: dict = field(default_factory=dict)
-    ssl_mode: str = None
-    ssl_ca: str = None
-    ssl_cert: str = None
-    ssl_key: str = None
-    tab_title: str = None
-    filters: str = None
+    host: str | None = None
+    port: int | None = None
+    user: str | None = None
+    password: str | None = None
+    socket: str | None = None
+    ssl: SSLConfig = field(default_factory=dict)
+    ssl_mode: str | None = None
+    ssl_ca: str | None = None
+    ssl_cert: str | None = None
+    ssl_key: str | None = None
+    tab_title: str | None = None
     filter_values: dict = field(default_factory=dict)
 
 
 @dataclass
 class HostGroupMember:
-    tab_title: str
+    tab_title: str | None
     host: str
-    port: int = None
-    credential_profile: CredentialProfile = None
-    key: str = None  # The key the host is listed under in Dolphie's config
+    port: int | None = None
+    credential_profile: str | None = None
+    key: str | None = None  # The key the host is listed under in Dolphie's config
 
 
 @dataclass
 class Config:
     app_version: str
     tab_setup: bool = False
-    credential_profile: str = None
-    user: str = None
-    password: str = None
+    credential_profile: str | None = None
+    user: str | None = None
+    password: str | None = None
     host: str = "localhost"
     port: int = 3306
-    socket: str = None
-    ssl: dict = field(default_factory=dict)
-    ssl_mode: str = None
-    ssl_ca: str = None
-    ssl_cert: str = None
-    ssl_key: str = None
+    socket: str | None = None
+    ssl: SSLConfig = field(default_factory=dict)
+    ssl_mode: str | None = None
+    ssl_ca: str | None = None
+    ssl_cert: str | None = None
+    ssl_key: str | None = None
     config_file: list[str] = field(
         default_factory=lambda: [
             "/etc/dolphie.cnf",
@@ -71,28 +74,28 @@ class Config:
     login_path: str = "client"
     host_cache_file: str = field(default_factory=lambda: f"{os.path.expanduser('~')}/dolphie_host_cache")
     tab_setup_file: str = field(default_factory=lambda: f"{os.path.expanduser('~')}/dolphie_hosts")
-    refresh_interval: int = 1
+    refresh_interval: float = 1
     graph_window_minutes: int = 10
-    heartbeat_table: str = None
+    heartbeat_table: str | None = None
     credential_profiles: dict[str, CredentialProfile] = field(default_factory=dict)
     tab_setup_available_hosts: list[str] = field(default_factory=list)
     startup_panels: list[str] = field(default_factory=lambda: ["dashboard", "processlist"])
     graph_marker: str = "braille"
     pypi_repository: str = "https://pypi.org/pypi/dolphie/json"
-    hostgroup: str = None
+    hostgroup: str | None = None
     hostgroup_hosts: dict[str, list[HostGroupMember]] = field(default_factory=dict)
     show_trxs_only: bool = False
     show_additional_query_columns: bool = False
-    filters: str = None
+    filters: str | None = None
     filter_values: dict = field(default_factory=dict)
     record_for_replay: bool = False
     daemon_mode: bool = False
     daemon_mode_panels: list[str] = field(default_factory=lambda: ["processlist", "metadata_locks"])
     daemon_mode_log_file: str = field(default_factory=lambda: f"{os.path.expanduser('~')}/dolphie_daemon.log")
-    replay_file: str = None
-    replay_dir: str = None
+    replay_file: str | None = None
+    replay_dir: str | None = None
     replay_retention_hours: int = 48
-    exclude_notify_global_vars: str = None
+    exclude_notify_global_vars: str | list[str] | None = None
 
 
 class ArgumentParser:
@@ -116,7 +119,9 @@ class ArgumentParser:
                 (
                     f"(comma-separated str) {option}"
                     if option in ("daemon_mode_panels", "startup_panels", "exclude_notify_global_vars", "filters")
-                    else f"({data_type.__name__}) {option}" if hasattr(data_type, "__name__") else f"(str) {option} []"
+                    else f"({data_type.__name__}) {option}"
+                    if hasattr(data_type, "__name__")
+                    else f"(str) {option} []"
                 )
                 for option, data_type in self.config_object_options.items()
                 if option != "config_file"
@@ -192,14 +197,7 @@ Dolphie's config supports these options under [dolphie] section:
         self.config = Config(app_version)
         self.panels = Panels()
 
-        self.console = Console(style="#e9e9e9", highlight=False)
-        self.console.push_theme(
-            Theme(
-                {
-                    "red2": "b #fb9a9a",
-                }
-            )
-        )
+        self.console = Console(style=FOREGROUND, highlight=False)
 
         self._add_options()
         self._parse()
@@ -277,8 +275,7 @@ Dolphie's config supports these options under [dolphie] section:
             dest="mycnf_file",
             type=str,
             help=(
-                "MySQL config file path to use. This should use [client] section "
-                f"[default: {self.config.mycnf_file}]"
+                f"MySQL config file path to use. This should use [client] section [default: {self.config.mycnf_file}]"
             ),
             metavar="",
         )
@@ -391,8 +388,8 @@ Dolphie's config supports these options under [dolphie] section:
             dest="graph_marker",
             type=str,
             help=(
-                "What marker to use for graphs (available options: https://tinyurl.com/dolphie-markers) [default: "
-                f"{self.config.graph_marker}]"
+                "What marker to use for graphs (available options: https://tinyurl.com/dolphie-markers) "
+                f"[default: {self.config.graph_marker}]"
             ),
             metavar="",
         )
@@ -401,8 +398,7 @@ Dolphie's config supports these options under [dolphie] section:
             dest="pypi_repository",
             type=str,
             help=(
-                "What PyPi repository to use when checking for a new version "
-                f"default: [{self.config.pypi_repository}]"
+                f"What PyPi repository to use when checking for a new version default: [{self.config.pypi_repository}]"
             ),
             metavar="",
         )
@@ -557,10 +553,10 @@ Dolphie's config supports these options under [dolphie] section:
         if options["debug_options"]:
             self.debug_options = True
 
-            self.debug_options_table = Table(box=box.SIMPLE_HEAVY, header_style="b", style="#333f62")
+            self.debug_options_table = Table(box=box.SIMPLE_HEAVY, header_style="b", style="table_border")
             self.debug_options_table.add_column("Source")
-            self.debug_options_table.add_column("Option", style="#91abec")
-            self.debug_options_table.add_column("Value", style="#bbc8e8")
+            self.debug_options_table.add_column("Option", style="highlight")
+            self.debug_options_table.add_column("Value", style="light_blue")
 
         for option in self.config_object_options:
             if self.debug_options:
@@ -625,13 +621,17 @@ Dolphie's config supports these options under [dolphie] section:
 
         if self.config.credential_profile and self.config.credential_profile not in self.config.credential_profiles:
             self.exit(
-                f"Credential profile [red2]{self.config.credential_profile}[/red2] does not exist in "
+                f"Credential profile [$red2]{self.config.credential_profile}[/$red2] does not exist in "
                 "Dolphie's config file"
             )
 
         # Filters are merged from the least specific source to the most, so each one only
         # overrides the filters it sets instead of replacing the whole set
-        profile = self.config.credential_profiles.get(self.config.credential_profile)
+        profile = (
+            self.config.credential_profiles.get(self.config.credential_profile)
+            if self.config.credential_profile
+            else None
+        )
         filter_values = merge_filters(
             self.parse_filters("filters option", dolphie_config_filters),
             profile.filter_values if profile else {},
@@ -725,17 +725,23 @@ Dolphie's config supports these options under [dolphie] section:
         if self.config.hostgroup:
             # Sanity check for hostgroup
             if self.config.hostgroup not in hostgroups:
-                self.exit(f"Hostgroup [red2]{self.config.hostgroup}[/red2] does not exist in Dolphie's config file")
+                self.exit(f"Hostgroup [$red2]{self.config.hostgroup}[/$red2] does not exist in Dolphie's config file")
 
             # Each host merges its credential profile's filters on top of the ones above when its tab
             # is created, so show what each of them will start with instead of only the merged option
             if self.debug_options:
-                hostgroup_filters = []
-                for member in hostgroups[self.config.hostgroup]:
-                    member_profile = self.config.credential_profiles.get(member.credential_profile)
-                    hostgroup_filters.append(
-                        (member, merge_filters(filter_values, member_profile.filter_values if member_profile else {}))
+                hostgroup_filters = [
+                    (
+                        member,
+                        merge_filters(
+                            filter_values,
+                            profile.filter_values
+                            if (profile := self.config.credential_profiles.get(member.credential_profile))
+                            else {},
+                        ),
                     )
+                    for member in hostgroups[self.config.hostgroup]
+                ]
 
                 if any(member_filters for _, member_filters in hostgroup_filters):
                     for member, member_filters in hostgroup_filters:
@@ -754,7 +760,7 @@ Dolphie's config supports these options under [dolphie] section:
             else:
                 self.exit("Your heartbeat table did not conform to the proper format: db.table")
 
-        if self.config.exclude_notify_global_vars:
+        if isinstance(self.config.exclude_notify_global_vars, str):
             self.config.exclude_notify_global_vars = self.config.exclude_notify_global_vars.split(",")
 
         # Validate panels
@@ -772,27 +778,29 @@ Dolphie's config supports these options under [dolphie] section:
 
         if self.debug_options:
             self.console.print(self.debug_options_table)
-            self.console.print("[#969aad]Note: Options are set by their source in the order they appear")
+            self.console.print(
+                themed_text("[$dark_gray]Note: Options are set by their source in the order they appear")
+            )
             sys.exit()
 
         # Verify parameters for replay & daemon mode
         if self.config.daemon_mode:
             self.config.record_for_replay = True
             if not self.config.replay_dir:
-                self.exit("Daemon mode ([red2]--daemon[/red2]) requires [red2]--replay-dir[/red2] to be specified")
+                self.exit("Daemon mode ([$red2]--daemon[/$red2]) requires [$red2]--replay-dir[/$red2] to be specified")
 
         if self.config.replay_file and not os.path.isfile(self.config.replay_file):
-            self.exit(f"Replay file [red2]{self.config.replay_file}[/red2] does not exist")
+            self.exit(f"Replay file [$red2]{self.config.replay_file}[/$red2] does not exist")
 
         if self.config.record_for_replay and not self.config.replay_dir:
-            self.exit("[red2]--record[/red2] requires [red2]--replay-dir[/red2] to be specified")
+            self.exit("[$red2]--record[/$red2] requires [$red2]--replay-dir[/$red2] to be specified")
 
         # Set replay directory if replay file is specified
         if self.config.replay_file and not self.config.replay_dir:
             self.config.replay_dir = os.path.dirname(os.path.dirname(self.config.replay_file))
 
-    def parse_hostgroup(self, cfg, section, config_file) -> list[HostGroupMember]:
-        hosts = []
+    def parse_hostgroup(self, cfg: RawConfigParser, section: str, config_file: str) -> list[HostGroupMember]:
+        hosts: list[HostGroupMember] = []
         for key in cfg.options(section):
             host_json = cfg.get(section, key).strip()
 
@@ -800,23 +808,60 @@ Dolphie's config supports these options under [dolphie] section:
             try:
                 host_data = json.loads(host_json)
                 if not host_data:
-                    self.exit(f"{config_file}: Hostgroup [red2]{section}[/red2] has no data for key [red2]{key}[/red2]")
+                    self.exit(
+                        f"{config_file}: Hostgroup [$red2]{section}[/$red2] has no data for key [$red2]{key}[/$red2]"
+                    )
             except json.JSONDecodeError:
                 self.exit(
-                    f"{config_file}: Invalid JSON value for hostgroup [red2]{section}[/red2], key [red2]{key}[/red2]"
+                    f"{config_file}: Invalid JSON value for hostgroup [$red2]{section}[/$red2], "
+                    f"key [$red2]{key}[/$red2]"
                 )
 
-            host = host_data.get("host")
+            if not isinstance(host_data, dict):
+                self.exit(
+                    f"{config_file}: Hostgroup [$red2]{section}[/$red2], key [$red2]{key}[/$red2] must be a JSON object"
+                )
+
+            host_value = host_data.get("host")
+            if not isinstance(host_value, str) or not host_value.strip():
+                self.exit(
+                    f"{config_file}: Hostgroup [$red2]{section}[/$red2], key [$red2]{key}[/$red2] "
+                    "must specify a non-empty host"
+                )
+
+            host = host_value.strip()
             port = self.config.port
             if ":" in host:
-                host, port = host.split(":")
+                host, port_value = host.rsplit(":", maxsplit=1)
+                if not host:
+                    self.exit(
+                        f"{config_file}: Hostgroup [$red2]{section}[/$red2], key [$red2]{key}[/$red2] "
+                        "must specify a non-empty host"
+                    )
+                try:
+                    port = int(port_value)
+                except ValueError:
+                    self.exit(
+                        f"{config_file}: Hostgroup [$red2]{section}[/$red2], key [$red2]{key}[/$red2] "
+                        f"has an invalid port [$red2]{port_value}[/$red2]"
+                    )
 
             tab_title = host_data.get("tab_title")
             credential_profile = host_data.get("credential_profile")
+            if tab_title is not None and not isinstance(tab_title, str):
+                self.exit(
+                    f"{config_file}: Hostgroup [$red2]{section}[/$red2], key [$red2]{key}[/$red2] "
+                    "has a non-string tab_title"
+                )
+            if credential_profile is not None and not isinstance(credential_profile, str):
+                self.exit(
+                    f"{config_file}: Hostgroup [$red2]{section}[/$red2], key [$red2]{key}[/$red2] "
+                    "has a non-string credential_profile"
+                )
             if credential_profile and credential_profile not in self.config.credential_profiles:
                 self.exit(
-                    f"{config_file}: Credential profile [red2]{credential_profile}[/red2] "
-                    f"not found for hostgroup [red2]{section}[/red2], key [red2]{key}[/red2]"
+                    f"{config_file}: Credential profile [$red2]{credential_profile}[/$red2] "
+                    f"not found for hostgroup [$red2]{section}[/$red2], key [$red2]{key}[/$red2]"
                 )
 
             hosts.append(
@@ -827,7 +872,7 @@ Dolphie's config supports these options under [dolphie] section:
 
         if not hosts:
             self.exit(
-                f"{config_file}: Hostgroup [red2]{section}[/red2] cannot be loaded because "
+                f"{config_file}: Hostgroup [$red2]{section}[/$red2] cannot be loaded because "
                 f"it doesn't have any hosts listed under its section in Dolphie's config"
             )
 
@@ -857,19 +902,20 @@ Dolphie's config supports these options under [dolphie] section:
             value = cfg.get(section, key).strip()
 
             if key in credential_profile_options:
-                setattr(credential, key, value)
-                self.add_to_debug_options(f"cred profile setup - {credential_name}", key, value)
+                parsed_value = self.verify_config_value(key, value, int) if key == "port" else value
+                setattr(credential, key, parsed_value)
+                self.add_to_debug_options(f"cred profile setup - {credential_name}", key, parsed_value)
             elif key == "tab_title":
                 credential.tab_title = value
                 self.add_to_debug_options(f"cred profile setup - {credential_name}", key, value)
             elif key == "filters":
-                credential.filters = value
                 credential.filter_values = self.parse_filters(f"credential profile {credential_name} filters", value)
                 self.add_to_debug_options(f"cred profile setup - {credential_name}", key, value)
             elif key == "mycnf_file":
                 if not os.path.isfile(value):
                     self.exit(
-                        f"mycnf file [red2]{value}[/red2] for credential profile [red2]{section}[/red2] does not exist"
+                        f"mycnf file [$red2]{value}[/$red2] for credential profile "
+                        f"[$red2]{section}[/$red2] does not exist"
                     )
 
                 # Parse client options from a my.cnf file
@@ -886,7 +932,7 @@ Dolphie's config supports these options under [dolphie] section:
                             )
                 else:
                     self.exit(
-                        f"mycnf file [red2]{value}[/red2] for credential profile [red2]{section}[/red2] "
+                        f"mycnf file [$red2]{value}[/$red2] for credential profile [$red2]{section}[/$red2] "
                         "does not have a client section"
                     )
             elif key == "login_path":
@@ -902,17 +948,17 @@ Dolphie's config supports these options under [dolphie] section:
                                 f"cred profile setup - {credential_name}", f"{key}/{option}", option_value
                             )
                 except Exception as e:
-                    self.exit(f"Error reading login path file for credential profile [red2]{section}[/red2]: {e}")
+                    self.exit(f"Error reading login path file for credential profile [$red2]{section}[/$red2]: {e}")
             else:
                 self.exit(
-                    f"Invalid option [red2]{key}[/red2] found in credential profile [red2]{section}[/red2]. "
+                    f"Invalid option [$red2]{key}[/$red2] found in credential profile [$red2]{section}[/$red2]. "
                     f"Supported options are: {', '.join(supported_options)}"
                 )
 
         # If section has no options listed
         if not any(getattr(credential, option) for option in credential_profile_options):
             self.exit(
-                f"Credential profile [red2]{credential_name}[/red2] has no valid options set. "
+                f"Credential profile [$red2]{credential_name}[/$red2] has no valid options set. "
                 f"Supported options are: {', '.join(supported_options)}"
             )
 
@@ -926,7 +972,7 @@ Dolphie's config supports these options under [dolphie] section:
         # Turns filters back into the format the filters option uses
         return ",".join(f"{filter_name}={filter_value}" for filter_name, filter_value in filters.items())
 
-    def parse_filters(self, source: str, value: str) -> dict:
+    def parse_filters(self, source: str, value: str | None) -> dict:
         # Turns the filters option (i.e. user=!azure_superuser,time=5) into the filters Dolphie starts with
         supported_filters = ("user", "host", "db", "hostgroup", "time", "query")
 
@@ -952,11 +998,11 @@ Dolphie's config supports these options under [dolphie] section:
             filter_value = filter_value.strip()
 
             if not separator:
-                self.exit(f"{source}: [red2]{filter_data.strip()}[/red2] must be in the format name=value")
+                self.exit(f"{source}: [$red2]{filter_data.strip()}[/$red2] must be in the format name=value")
 
             if filter_name not in supported_filters:
                 self.exit(
-                    f"{source}: Invalid filter [red2]{filter_name}[/red2]. "
+                    f"{source}: Invalid filter [$red2]{filter_name}[/$red2]. "
                     f"Supported filters are: {', '.join(supported_filters)}"
                 )
 
@@ -967,25 +1013,29 @@ Dolphie's config supports these options under [dolphie] section:
 
             # Time is a minimum, so excluding a value from it doesn't mean anything
             if filter_name == "time" and filter_value.startswith("!"):
-                self.exit(f"{source}: Filter [red2]time[/red2] doesn't support [red2]![/red2] exclusion")
+                self.exit(f"{source}: Filter [$red2]time[/$red2] doesn't support [$red2]![/$red2] exclusion")
 
             # Hostgroup can still be prefixed with ! to exclude it
-            if filter_name in ("hostgroup", "time"):
-                pattern = r"^!?\d+$" if filter_name == "hostgroup" else r"^\d+$"
-                if not re.search(pattern, filter_value):
-                    self.exit(f"{source}: Filter [red2]{filter_name}[/red2] must be an integer")
+            if filter_name in ("hostgroup", "time") and not is_valid_integer_filter(
+                filter_value, allow_negation=filter_name == "hostgroup"
+            ):
+                self.exit(f"{source}: Filter [$red2]{filter_name}[/$red2] must be an integer")
 
             filters[filter_name] = int(filter_value) if filter_name == "time" else filter_value
 
         return filters
 
-    def create_ssl_object(self, data: dict) -> dict:
-        ssl_payload = {}
+    def create_ssl_object(self, data: dict[str, object]) -> SSLConfig:
+        ssl_payload: SSLConfig = {}
 
-        ssl_mode = data.get("ssl_mode")
-        ssl_ca = data.get("ssl_ca")
-        ssl_cert = data.get("ssl_cert")
-        ssl_key = data.get("ssl_key")
+        ssl_mode_value = data.get("ssl_mode")
+        ssl_ca_value = data.get("ssl_ca")
+        ssl_cert_value = data.get("ssl_cert")
+        ssl_key_value = data.get("ssl_key")
+        ssl_mode = ssl_mode_value if isinstance(ssl_mode_value, str) else None
+        ssl_ca = ssl_ca_value if isinstance(ssl_ca_value, str) else None
+        ssl_cert = ssl_cert_value if isinstance(ssl_cert_value, str) else None
+        ssl_key = ssl_key_value if isinstance(ssl_key_value, str) else None
 
         if ssl_mode:
             ssl_mode = ssl_mode.upper()
@@ -994,18 +1044,18 @@ Dolphie's config supports these options under [dolphie] section:
                 ssl_payload["required"] = True
             elif ssl_mode == "VERIFY_CA":
                 if not ssl_ca:
-                    self.exit("SSL mode [red2]VERIFY_CA[/red2] requires a CA file (--ssl-ca) to be specified")
+                    self.exit("SSL mode [$red2]VERIFY_CA[/$red2] requires a CA file (--ssl-ca) to be specified")
 
                 ssl_payload["check_hostname"] = False
                 ssl_payload["verify_mode"] = True
             elif ssl_mode == "VERIFY_IDENTITY":
                 if not ssl_ca:
-                    self.exit("SSL mode [red2]VERIFY_IDENTITY[/red2] requires a CA file (--ssl-ca) to be specified")
+                    self.exit("SSL mode [$red2]VERIFY_IDENTITY[/$red2] requires a CA file (--ssl-ca) to be specified")
 
                 ssl_payload["check_hostname"] = True
                 ssl_payload["verify_mode"] = True
             else:
-                self.exit(f"Unsupported SSL mode [red2]{ssl_mode}[/red2]")
+                self.exit(f"Unsupported SSL mode [$red2]{ssl_mode}[/$red2]")
 
             if ssl_ca:
                 ssl_payload["ca"] = ssl_ca
@@ -1024,16 +1074,21 @@ Dolphie's config supports these options under [dolphie] section:
                 return False
             else:
                 self.exit(
-                    f"Error with Dolphie config: [red2]{option}[/red2] is a boolean and must either be true/false"
+                    f"Error with Dolphie config: [$red2]{option}[/$red2] is a boolean and must either be true/false"
                 )
         elif data_type is int:
             try:
                 return int(value)
             except ValueError:
-                self.exit(f"Error with Dolphie config: [red2]{option}[/red2] is an integer and must be a number")
+                self.exit(f"Error with Dolphie config: [$red2]{option}[/$red2] is an integer and must be a number")
+        elif data_type is float:
+            try:
+                return float(value)
+            except ValueError:
+                self.exit(f"Error with Dolphie config: [$red2]{option}[/$red2] must be a number")
         else:
             return value
 
-    def exit(self, message):
-        self.console.print(f"[indian_red]{message}[/indian_red]")
+    def exit(self, message: str) -> NoReturn:
+        self.console.print(themed_text(f"[indian_red]{message}[/indian_red]"))
         sys.exit()

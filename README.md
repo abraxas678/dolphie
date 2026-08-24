@@ -16,7 +16,7 @@
 
 ## Installation
 
-Requires Python 3.9+
+Requires Python 3.10+
 
 #### Using PyPi
 
@@ -24,12 +24,10 @@ Requires Python 3.9+
 $ pip install dolphie
 ```
 
-#### Using Poetry
+#### Using uv
 
 ```shell
-$ curl -sSL https://install.python-poetry.org | python3 -
-
-$ poetry install
+$ uv tool install dolphie
 ```
 
 #### Using Homebrew
@@ -319,6 +317,19 @@ Example:
 3={"host": "host3:3307", "tab_title": "[red]production[/red]", "credential_profile": "prod"}
 4={"host": "host4"}
 ```
+
+## Development
+
+```shell
+uv sync --all-groups
+uv run dolphie --help
+uv run ruff format .
+uv run ruff check .
+uv run basedpyright
+uv run pytest
+```
+
+BasedPyright runs without a baseline; new diagnostics must be fixed rather than suppressed as accepted debt.
 
 ## Feedback
 
